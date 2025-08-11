@@ -1,0 +1,8 @@
+streamlit
+sentence-transformers
+duckduckgo_search
+python-dotenv
+requests
+numpy
+pandas
+requests
