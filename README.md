@@ -20,18 +20,21 @@ A **Streamlit-based research assistant** that helps you:
 
 ## 🛠 Installation
 
-### 1️⃣ Clone the repository
+###  Clone the repository
 ```bash
 git clone https://github.com/yourusername/ai-research-assistant.git
 cd ai-research-assistant
 
-
-### Create a virtual environment
+```
+###  Create a virtual environment
+```bash
 python -m venv venv
 source venv/bin/activate  # On Mac/Linux
 venv\Scripts\activate     # On Windows
 
 pip install -r requirements.txt
-
+```
 ### Usage
+```bash
 streamlit run app.py
+```
