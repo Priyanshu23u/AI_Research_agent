@@ -6,6 +6,8 @@ from .arxiv_client import search_arxiv
 from .library import Library
 from .generator import LocalGenerator, DEFAULT_MODEL
 from .paper_builder import make_prompt, refs_markdown, assemble_markdown, write_docx, write_pdf
+from .enhanced_analyzer import EnhancedPaperAnalyzer
+from .enhanced_paper_builder import EnhancedPaperBuilder
 
 OUT_DIR = os.path.join("outputs")
 os.makedirs(OUT_DIR, exist_ok=True)
@@ -142,7 +144,54 @@ def build_parser():
     pg.set_defaults(func=cmd_generate)
 
     return p
-
+def cmd_generate_enhanced(args):
+    """Enhanced generation with comprehensive analysis"""
+    lib = Library(embed_model=args.embed_model)
+    
+    if args.use_ids:
+        ids = [int(x) for x in args.use_ids.split(",") if x.strip()]
+        papers_df = lib.get_by_ids(ids)
+    else:
+        papers_df = lib.retrieve(args.topic, top_k=args.top_k)
+    
+    if papers_df.empty:
+        print("No papers found.")
+        return
+    
+    # Convert DataFrame to list of dicts
+    papers = papers_df.to_dict('records')
+    
+    # Initialize enhanced components
+    gen = LocalGenerator(model_name=args.gen_model, load_in_4bit=args.load_in_4bit)
+    analyzer = EnhancedPaperAnalyzer(gen)
+    builder = EnhancedPaperBuilder(gen)
+    
+    # Analyze papers
+    print("Analyzing papers...")
+    analyses = analyzer.analyze_papers_batch(papers)
+    
+    # Identify gaps
+    print("Identifying research gaps...")
+    gaps = analyzer.identify_research_gaps(analyses)
+    
+    # Generate trends
+    print("Analyzing trends...")
+    trends = analyzer.generate_research_trends(analyses)
+    
+    # Generate enhanced paper
+    print("Generating enhanced research paper...")
+    sections = builder.generate_enhanced_paper(args.topic, analyses, gaps, trends)
+    
+    # Save results
+    refs_md = refs_markdown(papers_df)
+    title = f"{args.topic} — A Comprehensive Survey"
+    md = assemble_markdown(sections, refs_md, title)
+    
+    md_path = os.path.join(OUT_DIR, f"{args.out_name}_enhanced.md")
+    with open(md_path, "w", encoding="utf-8") as f:
+        f.write(md)
+    
+    print(f"✅ Enhanced paper saved to {md_path}")
 
 def main():
     parser = build_parser()

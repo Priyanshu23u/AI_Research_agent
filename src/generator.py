@@ -1,5 +1,6 @@
-from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
 import torch
+from transformers import AutoTokenizer, AutoModelForCausalLM
+# Removed pipeline import to avoid torchvision dependency
 
 try:
     from transformers import BitsAndBytesConfig
@@ -10,6 +11,8 @@ except Exception:
 DEFAULT_MODEL = "microsoft/Phi-3-mini-4k-instruct"
 
 class LocalGenerator:
+    """Fixed generator without pipeline dependency"""
+    
     def __init__(
         self,
         model_name: str = DEFAULT_MODEL,
@@ -17,6 +20,8 @@ class LocalGenerator:
         torch_dtype=None,
         load_in_4bit: bool = False,
     ):
+        print(f"[LocalGenerator] Initializing {model_name}...")
+        
         # Device + dtype setup
         if torch.cuda.is_available():
             device_map = device_map or "cuda"
@@ -31,6 +36,10 @@ class LocalGenerator:
 
         # Load tokenizer
         self.tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=False)
+        
+        # Ensure pad token exists
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
 
         model_kwargs = {
             "device_map": device_map,
@@ -38,57 +47,76 @@ class LocalGenerator:
             "trust_remote_code": False,
         }
 
-        # Optional 4-bit quantization
-        if load_in_4bit:
-            if not HAS_BNB:
-                raise RuntimeError("4-bit quantization requested but bitsandbytes is not installed. pip install bitsandbytes")
-            quant_config = BitsAndBytesConfig(
+        # Add quantization if requested
+        if load_in_4bit and HAS_BNB:
+            model_kwargs["quantization_config"] = BitsAndBytesConfig(
                 load_in_4bit=True,
-                bnb_4bit_compute_dtype=torch.float16,
-                bnb_4bit_use_double_quant=True,
                 bnb_4bit_quant_type="nf4",
+                bnb_4bit_compute_dtype=torch_dtype,
+                bnb_4bit_use_double_quant=True,
             )
-            model_kwargs["quantization_config"] = quant_config
 
-        # Load model
+        # Load model with fallback
         try:
             self.model = AutoModelForCausalLM.from_pretrained(model_name, **model_kwargs)
+            self.device = self.model.device
+            print(f"[LocalGenerator] Model loaded on {self.device}")
         except Exception as e:
-            raise RuntimeError(f"Failed to load local model '{model_name}': {e}")
-
-        # Setup pipeline
-        self.pipe = pipeline(
-            "text-generation",
-            model=self.model,
-            tokenizer=self.tokenizer,
-            device=0 if device_map == "cuda" else -1  # cuda:0 or cpu
-        )
+            print(f"[LocalGenerator] Failed optimal loading: {e}")
+            # Fallback to CPU
+            model_kwargs = {"torch_dtype": torch.float32, "device_map": "cpu"}
+            self.model = AutoModelForCausalLM.from_pretrained(model_name, **model_kwargs)
+            self.device = "cpu"
+            print(f"[LocalGenerator] Fallback: Model loaded on CPU")
 
     def generate(
         self,
         prompt: str,
-        max_new_tokens: int = 1000,
-        temperature: float = 0.5,
+        max_new_tokens: int = 512,
+        temperature: float = 0.7,
+        do_sample: bool = True,
         top_p: float = 0.9,
-        repetition_penalty: float = 1.05,
+        pad_token_id: int | None = None,
     ) -> str:
-        # Truncate overly long prompt
-        max_prompt_chars = 12000
-        if len(prompt) > max_prompt_chars:
-            prompt = prompt[-max_prompt_chars:]
-
-        # Generate
-        out = self.pipe(
+        """Generate text completion"""
+        
+        # Tokenize input
+        inputs = self.tokenizer(
             prompt,
-            max_new_tokens=max_new_tokens,
-            temperature=temperature,
-            top_p=top_p,
-            repetition_penalty=repetition_penalty,
-            do_sample=True,
-            pad_token_id=self.tokenizer.eos_token_id,
-        )[0]["generated_text"]
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
+            max_length=2048
+        )
+        
+        # Move to device
+        inputs = {k: v.to(self.device) for k, v in inputs.items()}
+        
+        # Set pad token
+        if pad_token_id is None:
+            pad_token_id = self.tokenizer.pad_token_id or self.tokenizer.eos_token_id
 
-        # Remove prompt from output (to get only new text)
-        if out.startswith(prompt):
-            out = out[len(prompt):]
-        return out.strip()
+        # Generate text
+        with torch.no_grad():
+            try:
+                outputs = self.model.generate(
+                    **inputs,
+                    max_new_tokens=max_new_tokens,
+                    temperature=temperature,
+                    do_sample=do_sample,
+                    top_p=top_p,
+                    pad_token_id=pad_token_id,
+                    eos_token_id=self.tokenizer.eos_token_id,
+                    repetition_penalty=1.1,
+                )
+                
+                # Decode only new tokens
+                input_length = inputs['input_ids'].shape[1]
+                generated_tokens = outputs[0][input_length:]
+                response = self.tokenizer.decode(generated_tokens, skip_special_tokens=True)
+                
+                return response.strip()
+                
+            except Exception as e:
+                print(f"[LocalGenerator] Generation failed: {e}")
+                return f"Error generating response: {str(e)}"
